@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Tavant Demo</string>
+    <!-- TODO: Remove or change this placeholder text -->
+    <string name="home">Home</string>
+    <string name="favorite">Favorite</string>
+    <string name="news">Product</string>
+    <string name="favToolbar">WishList</string>
+    <string name="source">Source</string>
+    <string name="published_at">Published at</string>
+    <string name="news_title">Product Title</string>
+    <string name="description">Description</string>
+    <string name="floating_button">Floating button</string>
+    <string name="webViewToolbar">Details</string>
+    <string name="homeToolbar">Product List</string>
+    <string name="successfully_deleted_message">Successfully deleted!</string>
+    <string name="snackbar_undo">Undo</string>
+    <string name="error_occured">An error occured!</string>
+    <string name="article_added_message">Product added to favorite!</string>
+    <string name="article_already_saved">This Product already saved!</string>
+
+</resources>
