@@ -16,7 +16,7 @@
             android:id="@+id/customToolbar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="@color/red"
+            android:background="@color/teal_200"
             app:navigationIcon="@drawable/back_icon"
             >
 

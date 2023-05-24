@@ -27,7 +27,7 @@ class ProductAdapter: RecyclerView.Adapter<ProductAdapter.ItemViewHolder>() {
     val asyncListDiffer = AsyncListDiffer(this,callback)
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ItemViewHolder {
-        return ItemViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.news_item,parent,false))
+        return ItemViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.product_item,parent,false))
     }
 
     override fun getItemCount(): Int = asyncListDiffer.currentList.size
