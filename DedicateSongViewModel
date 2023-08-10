@@ -1,0 +1,307 @@
+package com.timesgroup.mirchiplay.ui.dedicatesong
+
+import android.app.Application
+import android.content.ContentResolver
+import android.content.ContentUris
+import android.content.ContentValues
+import android.content.Context
+import android.database.Cursor
+import android.media.MediaRecorder
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.os.ParcelFileDescriptor
+import android.provider.MediaStore
+import android.view.View
+import androidx.annotation.RequiresApi
+import androidx.core.net.toUri
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.navigation.findNavController
+import com.timesgroup.mirchiplay.R
+import com.timesgroup.mirchiplay.common.interfaces.NavigationUpListener
+import com.timesgroup.mirchiplay.data.AppRepository
+import com.timesgroup.mirchiplay.data.AppStorage
+import com.timesgroup.mirchiplay.network.MirchiService
+import com.timesgroup.mirchiplay.utilities.Constants
+import com.timesgroup.mirchiplay.utilities.LoadingState
+import com.timesgroup.mirchiplay.utilities.toast
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
+import java.io.FileDescriptor
+import java.util.*
+import javax.inject.Inject
+
+@HiltViewModel
+class DedicateSongViewModel @Inject constructor(
+    var repository: AppRepository,
+    var app: Application,
+    var storage: AppStorage,
+    var mirchiService: MirchiService
+) : ViewModel(), NavigationUpListener {
+    var isFromRequestSongFragment: Boolean = false
+    var isRecordingStopped: Boolean = false
+    var timerCompleted: MutableLiveData<Boolean> = MutableLiveData(false)
+    var mediaRecorder: MediaRecorder? = null
+    private var timer = Timer()
+    private var recordingTime: Long = 0
+    private var recordedTime: String? = null
+    var displayName: String? = null
+    var audioUri: Uri? = null
+    private val recordingTimeString = MutableLiveData<String>()
+    private var _loadingState: MutableLiveData<LoadingState> = MutableLiveData(LoadingState.Idle)
+    val loadingState: LiveData<LoadingState>
+        get() = _loadingState
+
+
+    override fun navigateUp(view: View) {
+        view.findNavController().navigateUp()
+    }
+
+    fun onRequestSongClick(v: View) {
+        v.findNavController().navigate(R.id.requestSongShowFragment)
+    }
+
+    fun getVoiceTextData(
+        voiceMessage: MultipartBody.Part?,
+        textMessage: String,
+        stationId: String
+    ) {
+        _loadingState.value = LoadingState.Loading
+        viewModelScope.launch {
+            try {
+                val userId = storage.userId.toRequestBody("text/plain".toMediaTypeOrNull())
+                val stationId = stationId.toRequestBody("text/plain".toMediaTypeOrNull())
+                val messageText = textMessage.toRequestBody("text/plain".toMediaTypeOrNull())
+                val response = mirchiService.postVoiceTextMessage(
+                    userId,
+                    messageText, stationId,
+                    voiceMessage
+                )
+                if (response.resultCode == 0) {
+//                    response.message?.let { app.toast(it) }
+                    _loadingState.value = LoadingState.Success()
+                }
+
+
+            } catch (e: Exception) {
+                e.printStackTrace()
+                app.toast(app.getString(R.string.failed_to_load))
+                _loadingState.value = LoadingState.Success("Failed to save data")
+            }
+        }
+    }
+
+
+    fun startRecording() {
+        try {
+            isRecordingStopped = false
+            mediaRecorder = MediaRecorder()
+            mediaRecorder!!.setAudioSource(MediaRecorder.AudioSource.MIC)
+            mediaRecorder!!.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                mediaRecorder!!.setOutputFile(getFilePath())
+            } else {
+                mediaRecorder!!.setOutputFile(getFileDescriptor())
+            }
+            mediaRecorder!!.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            mediaRecorder!!.prepare()
+            mediaRecorder!!.start()
+            timer.cancel()
+            timer = Timer()
+            startTimer()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    /** stop record */
+    fun stopRecording() {
+        try {
+            if (mediaRecorder != null) {
+                mediaRecorder?.stop()
+                mediaRecorder?.release()
+                stopTimer()
+                resetTimer()
+                mediaRecorder = null
+                isRecordingStopped = true
+
+            }
+        } catch (e: Exception) {
+
+        }
+
+    }
+
+    private fun startTimer() {
+        var timerCounter = 1
+        timer.scheduleAtFixedRate(object : TimerTask() {
+            override fun run() {
+                if (timerCounter == 60) {
+                    stopTimer()
+                }
+                recordingTime += 1
+                timerCounter++
+                MainScope().launch {
+                    withContext(Dispatchers.Default) {
+                        val minutes = recordingTime / (60)
+                        val seconds = recordingTime % 60
+                        recordedTime = String.format("%d:%02d", minutes, seconds)
+                    }
+                    recordingTimeString.postValue(recordedTime.toString())
+
+                }
+
+            }
+        }, 1000, 1000)
+    }
+
+    private fun stopTimer() {
+        try {
+            timer.cancel()
+            timer = Timer()
+            timerCompleted.postValue(true)
+        } catch (e: java.lang.IllegalStateException) {
+        }
+    }
+
+
+    private fun resetTimer() {
+        timer.cancel()
+        recordingTime = 0
+        recordingTimeString.postValue("00:00")
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    fun getFileDescriptor(): FileDescriptor {
+
+        var relativePath: String? = null
+        var media_id: String? = null
+        val filePathColumn =
+            arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.DISPLAY_NAME)
+        var uri = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} = ?"
+        val selectionArgs = arrayOf(Constants.VOICE_RECORD_FILE_NAME)
+        var cursor: Cursor? = null
+        try {
+            cursor = app.applicationContext?.getContentResolver()
+                ?.query(uri, filePathColumn, selection, selectionArgs, null)
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    val idColumn: Int = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                    val nameColumn: Int =
+                        cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                    val uri: Uri = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                    relativePath =
+                        ContentUris.withAppendedId(uri, cursor.getLong(idColumn)).toString()
+                    displayName = cursor.getString(nameColumn)
+                    media_id = cursor.getLong(idColumn).toString()
+
+                }
+            }
+        } finally {
+            cursor?.close()
+        }
+
+        val resolver: ContentResolver = app.applicationContext.contentResolver
+        val audioCollection: Uri = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        val values = ContentValues().apply {
+            put(MediaStore.Audio.Media.DISPLAY_NAME, Constants.VOICE_RECORD_FILE_NAME)
+            put(MediaStore.Audio.Media.MIME_TYPE, "audio/*")
+            put(MediaStore.Audio.Media.RELATIVE_PATH, getAudioDirectoryPath())
+        }
+        audioUri = if (!relativePath.isNullOrEmpty()) {
+            Uri.parse(relativePath)
+        } else {
+            resolver.insert(audioCollection, values)
+        }
+        val parcelFileDescriptor: ParcelFileDescriptor =
+            resolver.openFileDescriptor(audioUri!!, "wt")!!
+        return parcelFileDescriptor.fileDescriptor
+    }
+
+    fun getFileDescriptor2(): FileDescriptor {
+        val parcelFileDescriptor: ParcelFileDescriptor =
+            app.applicationContext?.contentResolver?.openFileDescriptor(audioUri!!, "r")!!
+        return parcelFileDescriptor.fileDescriptor
+    }
+
+    fun getFilePath(): String {
+        val directory: File =
+            getAppSpecificAudioStorageDir(
+                app.applicationContext,
+                Environment.DIRECTORY_MUSIC,
+                "Mirchi"
+            )
+        val file = File(directory, Constants.VOICE_RECORD_FILE_NAME)
+        audioUri = file.absolutePath.toUri()
+        return file.absolutePath
+    }
+
+    private fun getAppSpecificAudioStorageDir(
+        context: Context?,
+        directoryName: String,
+        subdirectoryName: String
+    ): File {
+        val file = File(
+            context?.getExternalFilesDir(
+                directoryName
+            ), subdirectoryName
+        )
+        if (!file.mkdirs()) {
+        }
+
+        return file
+    }
+
+    private fun getAudioDirectoryPath(): String {
+        return Environment.DIRECTORY_MUSIC + File.separator + "Mirchi" + File.separator
+    }
+
+    fun deleteFileUsingDisplayName(displayName: String?): Boolean {
+        val uri: Uri? = audioUri
+        if (uri != null) {
+            audioUri = null
+            val resolver = app.applicationContext?.contentResolver
+            val selectionArgsPdf = arrayOf(displayName)
+            try {
+                resolver?.delete(
+                    uri,
+                    MediaStore.Files.FileColumns.DISPLAY_NAME + "=?",
+                    selectionArgsPdf
+                )
+                return true
+            } catch (ex: java.lang.Exception) {
+                ex.printStackTrace()
+            }
+        }
+        return false
+    }
+
+    fun getRealPathFromURI(contentURI: Uri): String {
+        val result: String
+        val cursor: Cursor? =
+            app.applicationContext?.contentResolver?.query(contentURI, null, null, null, null)
+        if (cursor == null) {
+            result = contentURI.path!!
+        } else {
+            cursor.moveToFirst()
+            val idx = cursor.getColumnIndex(MediaStore.Audio.AudioColumns.DATA)
+            result = cursor.getString(idx)
+            cursor.close()
+        }
+        return result
+    }
+
+
+    fun getRecordingTime() = recordingTimeString
+}
