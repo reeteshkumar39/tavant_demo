@@ -1,0 +1,462 @@
+package com.timesgroup.mirchiplay.ui.dedicatesong
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.media.MediaPlayer
+import android.os.Build
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.SeekBar
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.MutableLiveData
+import androidx.navigation.fragment.findNavController
+import androidx.viewpager2.widget.ViewPager2.OnPageChangeCallback
+import com.google.android.material.tabs.TabLayoutMediator
+import com.timesgroup.mirchiplay.R
+import com.timesgroup.mirchiplay.base.BaseFragment
+import com.timesgroup.mirchiplay.data.AppStorage
+import com.timesgroup.mirchiplay.databinding.FragmentDedicateSongLayoutBinding
+import com.timesgroup.mirchiplay.player.other.isBuffering
+import com.timesgroup.mirchiplay.player.other.isPlaying
+import com.timesgroup.mirchiplay.utilities.Constants
+import com.timesgroup.mirchiplay.utilities.LoadingState
+import com.timesgroup.mirchiplay.utilities.debugLog
+import com.timesgroup.mirchiplay.utilities.toast
+import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.asRequestBody
+import java.io.File
+import javax.inject.Inject
+
+
+/***
+ * DedicateSongFragment, ways of request song :voice/message by  user .
+ */
+@AndroidEntryPoint
+class DedicateSongFragment : BaseFragment() {
+
+    private var isPlayerStopped: Boolean = false
+    private lateinit var binding: FragmentDedicateSongLayoutBinding
+    private val viewModel: DedicateSongViewModel by viewModels()
+    private var fromSelectSongShowFragment: MutableLiveData<Boolean> = MutableLiveData(false)
+    private var songTitle: String = ""
+    private var showId = ""
+    private var songId = ""
+    private var radioStationId = ""
+
+    private var mediaPlayer: MediaPlayer? = null
+    var currentPosition: Int = 0
+    private var lastProgress = 0
+    lateinit var showTitle: String
+    lateinit var songImageUrl: String
+    lateinit var rjName: String
+
+    @Inject
+    lateinit var appStorage: AppStorage
+
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        binding = FragmentDedicateSongLayoutBinding.inflate(layoutInflater, container, false)
+        context ?: return binding.root
+
+        subscribeUI()
+        bindUI()
+        //setFragmentListener()
+        //pauseRadioPlayer()
+        return binding.root
+    }
+
+    private fun subscribeUI() {
+        viewModel.getRecordingTime().observe(viewLifecycleOwner) {
+            binding.recordDurationTV.text = it
+        }
+        viewModel.getRecordingTime().observe(viewLifecycleOwner) {
+            binding.recordDurationTV.text = it
+        }
+
+        viewModel.timerCompleted.observe(viewLifecycleOwner) {
+            if (it) {
+                stopRecordingAuto()
+            }
+        }
+        when (PackageManager.PERMISSION_GRANTED) {
+            requireContext().checkCallingOrSelfPermission(Manifest.permission.RECORD_AUDIO)
+            -> {
+                //Comment cause of auto recording feature removed
+                //viewModel.startRecording()
+            }
+            else -> {
+                toast("Please provide record permission")
+            }
+        }
+        viewModel.loadingState.observe(viewLifecycleOwner) {
+            when (it) {
+                is LoadingState.Success -> {
+                    toast(getString(R.string.message_sent))
+                    appStorage.sentMessageCount++
+                    findNavController().popBackStack()
+                }
+                is LoadingState.Error -> {
+                    toast(getString(R.string.error))
+                    toast(it.err?.message ?: it.msg)
+
+                }
+                is LoadingState.Loading -> {
+                    toast("Loading")
+
+                }
+                else -> {
+                    //toast(getString(R.string.unknown))
+
+                }
+            }
+        }
+
+        mainViewModel.musicServiceConnection.playbackState.observe(this) { playbackState ->
+            when {
+                playbackState.isBuffering ||
+                        playbackState.isPlaying -> {
+                    onPausedAction()
+                }
+                else -> {
+                }
+            }
+        }
+    }
+
+    private fun getViewArguments() {
+        arguments?.let {
+            val args = DedicateSongFragmentArgs.fromBundle(it)
+            binding.stationTitleTv.text = args.radioStationName
+            val subtitle = args.radioFrequency + " • " + args.rjName
+            binding.stationSubtitleTv.text = subtitle
+            radioStationId = args.radioStationId
+
+        }
+    }
+
+    /** getting data from Request Song Screen */
+    private fun setFragmentListener() {
+        requireActivity().supportFragmentManager.setFragmentResultListener(
+            Constants.REQUEST_SONG_KEY,
+            viewLifecycleOwner
+        ) { _: String, bundle ->
+
+            songTitle = bundle.getString(Constants.SONG_TITLE).toString()
+            showTitle = bundle.getString(Constants.SHOW_TITLE).toString()
+            songImageUrl = bundle.getString(Constants.SONG_IMAGE_URL).toString()
+            rjName = bundle.getString(Constants.RJ_NAME).toString()
+            songId = bundle.getString(Constants.SONG_ID).toString()
+            showId = bundle.getString(Constants.SHOW_ID).toString()
+            debugLog("showed$showId")
+
+            if (songId != "" || showId != "") {
+                fromSelectSongShowFragment.value = true
+            }
+        }
+    }
+
+
+    private fun bindUI() {
+        getViewArguments()
+
+
+        val tabAdapter = DedicateSongTabAdapter(requireActivity(),
+            object : SendTextMessageFragment.OnSendTextMessageClickListener {
+                override fun onSendTextMessage(textMessage: String) {
+
+                    viewModel.getVoiceTextData(null, textMessage, radioStationId)
+                }
+            })
+        binding.viewPagerDedicateSong.adapter = tabAdapter
+        binding.viewPagerDedicateSong.registerOnPageChangeCallback(object : OnPageChangeCallback() {
+
+            override fun onPageSelected(position: Int) {
+                super.onPageSelected(position)
+                onSwipeUpdateText(position)
+
+            }
+
+        })
+        binding.viewPagerDedicateSong.let {
+            TabLayoutMediator(binding.tabLayoutDedicateSong, it) { tab, pos ->
+                when (pos) {
+                    0, 1 -> tab.text = ""
+                }
+            }.attach()
+
+        }
+        binding.closeBtn.setOnClickListener {
+            onPausedAction()
+            findNavController()
+                .popBackStack()
+        }
+        binding.btnRequestSong.setOnClickListener {
+            viewModel.stopRecording()
+            resumeRadioPlayer()
+            val action =
+                DedicateSongFragmentDirections.actionDedicateSongFragmentToRequestSongShowFragment(
+                    radioStationId
+                )
+            findNavController().navigate(action)
+        }
+        binding.stopButton.setOnClickListener {
+            stopRecordingAuto()
+        }
+        binding.recordButton.setOnClickListener {
+            viewModel.startRecording()
+            pauseRadioPlayer()
+            binding.stopButton.visibility = View.VISIBLE
+            binding.recordButton.visibility = View.INVISIBLE
+
+        }
+        binding.discardButton.setOnClickListener {
+            stopPlayingAudio()
+            viewModel.deleteFileUsingDisplayName(viewModel.displayName)
+            binding.discardButton.visibility = View.INVISIBLE
+            binding.recordButton.visibility = View.VISIBLE
+            binding.seekBarPlayButton.visibility = View.INVISIBLE
+            binding.voiceRecordSeekBarView.visibility = View.INVISIBLE
+
+        }
+
+        binding.seekBarPlayButton.setOnClickListener {
+            if (mediaPlayer != null && mediaPlayer?.isPlaying == true) {
+                pausePlayingAudio()
+            } else {
+                playRecording()
+            }
+        }
+
+        binding.sendBtn.setOnClickListener {
+            viewModel.stopRecording()
+            resumeRadioPlayer()
+            sendVoiceMessage()
+        }
+        fromSelectSongShowFragment.observe(viewLifecycleOwner) {
+            if (it == true) {
+                binding.selectedMusicImage.visibility = View.VISIBLE
+                binding.btnEditRequestedSong.visibility = View.VISIBLE
+                binding.selectedShowRJ.visibility = View.VISIBLE
+                binding.selectedMusicTitle.visibility = View.VISIBLE
+                binding.selectedMusicTitle.text = songTitle
+                binding.selectedShowRJ.text = showTitle + " . " + rjName
+                binding.btnRequestSong.visibility = View.GONE
+                binding.tvDescription.visibility = View.GONE
+                binding.btnEditRequestedSong.setOnClickListener {
+                    val action =
+                        DedicateSongFragmentDirections.actionDedicateSongFragmentToRequestSongShowFragment(
+                            radioStationId
+                        )
+                    findNavController().navigate(action)
+                }
+
+            }
+        }
+    }
+
+    private fun stopRecordingAuto() {
+        viewModel.stopRecording()
+        resumeRadioPlayer()
+        binding.stopButton.visibility = View.INVISIBLE
+        binding.discardButton.visibility = View.VISIBLE
+        binding.seekBarPlayButton.visibility = View.VISIBLE
+        binding.voiceRecordSeekBarView.visibility = View.VISIBLE
+    }
+
+    /** send data to server of voice/message */
+    private fun sendVoiceMessage() {
+
+        if (viewModel.audioUri != null) {
+            val file: File = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                File(viewModel.getFilePath())
+            } else {
+                File(viewModel.getRealPathFromURI(viewModel.audioUri!!))
+            }
+            val voiceMessageBody = MultipartBody.Part.createFormData(
+                "voiceMessage",
+                file.name,
+                file.asRequestBody()
+            )
+            //TODO Add Api For Request song
+            viewModel.getVoiceTextData(voiceMessageBody, "", radioStationId)
+
+
+        } else {
+            toast("Please record first ")
+        }
+
+    }
+
+
+    private fun onSwipeUpdateText(position: Int) {
+        when (position) {
+            0 -> {
+                binding.recordIV.visibility = View.VISIBLE
+                binding.recordDurationTV.visibility = View.VISIBLE
+                binding.bottomLayout.visibility = View.VISIBLE
+                if (viewModel.isRecordingStopped) {
+                    binding.discardButton.visibility = View.VISIBLE
+                    binding.recordButton.visibility = View.INVISIBLE
+                    binding.seekBarPlayButton.visibility = View.VISIBLE
+                    binding.voiceRecordSeekBarView.visibility = View.VISIBLE
+                } else {
+                    binding.discardButton.visibility = View.INVISIBLE
+                    binding.recordButton.visibility = View.VISIBLE
+                }
+            }
+            1 -> {
+                binding.recordIV.visibility = View.INVISIBLE
+                binding.recordDurationTV.visibility = View.INVISIBLE
+                binding.bottomLayout.visibility = View.INVISIBLE
+                binding.recordButton.visibility = View.VISIBLE
+                binding.stopButton.visibility = View.INVISIBLE
+                viewModel.stopRecording()
+                stopPlayingAudio()
+            }
+
+        }
+    }
+
+
+    private fun playRecording() {
+        pauseRadioPlayer()
+        if (viewModel.isRecordingStopped) {
+            try {
+                if (mediaPlayer == null) {
+                    mediaPlayer = MediaPlayer()
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                        mediaPlayer?.setDataSource(viewModel.getFilePath())
+
+                    } else {
+                        mediaPlayer?.setDataSource(viewModel.getFileDescriptor2())
+                    }
+                    mediaPlayer?.prepare()
+                }
+
+                mediaPlayer?.start()
+                //Toast.makeText(context, "Recording is playing", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        binding.seekBarPlayButton.setImageResource(R.drawable.ic_pause_new)
+
+        binding.voiceRecordSeekBarView.progress = lastProgress
+        mediaPlayer?.seekTo(lastProgress)
+
+        mediaPlayer?.duration.let {
+            binding.voiceRecordSeekBarView.max = mediaPlayer?.duration ?: 0
+        }
+
+        seekBarUpdate()
+        mediaPlayer?.setOnCompletionListener {
+            if (mediaPlayer?.isPlaying == false) {
+                binding.seekBarPlayButton.setImageResource(R.drawable.ic_play)
+                mediaPlayer?.seekTo(0)
+                resumeRadioPlayer()
+            }
+        }
+
+        binding.voiceRecordSeekBarView.setOnSeekBarChangeListener(object :
+            SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (mediaPlayer != null && fromUser) {
+                    mediaPlayer?.seekTo(progress)
+                    lastProgress = progress
+                }
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+
+    }
+
+    private fun seekBarUpdate() {
+        try {
+            if (mediaPlayer != null) {
+                val mCurrentPosition = mediaPlayer?.currentPosition ?: 0
+                binding.voiceRecordSeekBarView.progress = mCurrentPosition
+                lastProgress = mCurrentPosition
+            }
+            CoroutineScope(Dispatchers.IO).launch {
+                delay(100)
+                seekBarUpdate()
+            }
+        } catch (e: Exception) {
+            debugLog(e.printStackTrace().toString())
+        }
+    }
+
+
+    override fun onPause() {
+        onPausedAction()
+        super.onPause()
+    }
+
+    private fun onPausedAction() {
+        if (!viewModel.isRecordingStopped) {
+            viewModel.stopRecording()
+        } else {
+            stopPlayingAudio()
+        }
+        resumeRadioPlayer()
+    }
+
+    override fun onDetach() {
+        super.onDetach()
+        resumeRadioPlayer()
+    }
+
+    private fun stopPlayingAudio() {
+        if (mediaPlayer != null) {
+            if (mediaPlayer?.isPlaying == true) {
+                currentPosition = 0
+                mediaPlayer?.stop()
+                mediaPlayer?.release()
+                mediaPlayer = null
+                binding.seekBarPlayButton.setImageResource(R.drawable.ic_play)
+            }
+        }
+        resumeRadioPlayer()
+    }
+
+    private fun pausePlayingAudio() {
+        if (mediaPlayer != null) {
+            if (mediaPlayer?.isPlaying == true) {
+                mediaPlayer?.pause()
+                binding.seekBarPlayButton.setImageResource(R.drawable.ic_play)
+            }
+        }
+        resumeRadioPlayer()
+    }
+
+
+    private fun pauseRadioPlayer() {
+        debugLog("Player state:${mainViewModel.musicServiceConnection.playbackState.value}")
+        if (mainViewModel.musicServiceConnection.playbackState.value?.isPlaying == true) {
+            isPlayerStopped = true
+            mainViewModel.musicServiceConnection.transportControls.pause()
+        }
+    }
+
+    private fun resumeRadioPlayer() {
+        if (isPlayerStopped) {
+            isPlayerStopped = false
+            mainViewModel.musicServiceConnection.transportControls.play()
+        }
+        debugLog("Player state:${mainViewModel.musicServiceConnection.playbackState.value}")
+    }
+}
